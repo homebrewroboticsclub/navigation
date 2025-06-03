@@ -8,7 +8,7 @@ This is our first attempt to take Baby Brewie beyond the confines of home! The s
 
 We're still teaching the robot how to walk, so reactions to external events and more flexible route planning are still in development. Nevertheless, we're ready for our first journey!
 
-*GIF of a walking robot*
+![](ASSETS/brew_walk_short.gif)
 
 ## Hardware Modifications
 
