@@ -1,0 +1,10 @@
+//Start our node for servo data collection
+//TODO Make a Launch file
+rosrun ainex_navi_hat arduino_sensor_node.py _port:=/dev/ttyUSB0 _baudrate:=115200
+
+//Default build
+catkin build
+
+For new packages
+cd devel
+source setup.bash

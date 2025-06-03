@@ -1,0 +1,86 @@
+#include <Wire.h>
+#include <TinyGPS++.h>
+#include <SoftwareSerial.h>
+
+#define GPS_RX_PIN 5  // Connect GPS TX to this pin (Arduino RX)
+#define GPS_TX_PIN 6  // Connect GPS RX to this pin (Arduino TX)
+
+SoftwareSerial gpsSerial(GPS_RX_PIN, GPS_TX_PIN); // RX, TX
+
+TinyGPSPlus gps;
+
+#define HMC5883L_ADDR 0x1E
+
+void setup() {
+  Serial.begin(115200);      // USB Serial for data transmission to ROS
+  gpsSerial.begin(9600);     // GPS speed (usually 9600)
+
+  Wire.begin();
+
+  // Initialize HMC5883L
+  Wire.beginTransmission(HMC5883L_ADDR);
+  Wire.write(0x00);          // Config Register A
+  Wire.write(0x70);          // 8 samples, 15 Hz
+  Wire.endTransmission();
+
+  Wire.beginTransmission(HMC5883L_ADDR);
+  Wire.write(0x01);          // Config Register B
+  Wire.write(0xA0);          // Gain
+  Wire.endTransmission();
+
+  Wire.beginTransmission(HMC5883L_ADDR);
+  Wire.write(0x02);          // Mode
+  Wire.write(0x00);          // Continuous mode
+  Wire.endTransmission();
+}
+
+void readMagnetometer(int16_t &x, int16_t &y, int16_t &z) {
+  Wire.beginTransmission(HMC5883L_ADDR);
+  Wire.write(0x03);          // Data start register
+  Wire.endTransmission();
+
+  Wire.requestFrom(HMC5883L_ADDR, 6);
+  if (Wire.available() == 6) {
+    x = Wire.read() << 8 | Wire.read();
+    z = Wire.read() << 8 | Wire.read();
+    y = Wire.read() << 8 | Wire.read();
+  }
+}
+
+void loop() {
+  // Read GPS from SoftwareSerial
+  while (gpsSerial.available() > 0) {
+    gps.encode(gpsSerial.read());
+  }
+
+  // If there is a GPS coordinate update, send it
+  if (gps.location.isUpdated()) {
+    float lat = gps.location.lat();
+    float lon = gps.location.lng();
+    float alt = gps.altitude.meters();
+
+    Serial.print("GPS,");
+    Serial.print(lat, 6);
+    Serial.print(",");
+    Serial.print(lon, 6);
+    Serial.print(",");
+    Serial.print(alt, 2);
+    Serial.println();
+  }
+
+  // Read magnetometer
+  int16_t mx, my, mz;
+  readMagnetometer(mx, my, mz);
+
+  // Send magnetometer data (in microteslas)
+  Serial.print("MAG,");
+  Serial.print(mx * 0.92);
+  Serial.print(",");
+  Serial.print(my * 0.92);
+  Serial.print(",");
+  Serial.print(mz * 0.92);
+  Serial.println();
+
+  delay(100); // approximately 10 Hz
+}
+

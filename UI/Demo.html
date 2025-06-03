@@ -1,0 +1,454 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>GPS Robot Tracker</title>
+  <meta charset="utf-8" />
+  <style>
+    body, html {
+      margin: 0; padding: 0; height: 100%;
+      font-family: Arial, sans-serif;
+    }
+    #map { height: 100vh; width: 100vw; }
+    #loading {
+      position: absolute;
+      top: 10px; left: 50%;
+      transform: translateX(-50%);
+      background: rgba(255,255,255,0.9);
+      padding: 10px 20px;
+      border-radius: 5px;
+      font-weight: bold;
+      z-index: 1000;
+    }
+    #error {
+      position: absolute;
+      top: 50px; left: 50%;
+      transform: translateX(-50%);
+      background: rgba(255,0,0,0.8);
+      color: white;
+      padding: 10px 20px;
+      border-radius: 5px;
+      font-weight: bold;
+      z-index: 1000;
+      display: none;
+    }
+    #controls {
+      position: absolute;
+      bottom: 20px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 1000;
+      background: rgba(255,255,255,0.9);
+      padding: 15px;
+      border-radius: 10px;
+      box-shadow: 0 0 15px rgba(0,0,0,0.2);
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      width: 80%;
+      max-width: 500px;
+    }
+    .control-row {
+      display: flex;
+      gap: 10px;
+    }
+    #address {
+      flex-grow: 1;
+      padding: 8px;
+      border: 1px solid #ccc;
+      border-radius: 5px;
+    }
+    button {
+      padding: 8px 15px;
+      border: none;
+      border-radius: 5px;
+      background: #4CAF50;
+      color: white;
+      cursor: pointer;
+      font-weight: bold;
+    }
+    button:hover {
+      background: #45a049;
+    }
+    #clear {
+      background: #f44336;
+    }
+    #clear:hover {
+      background: #d32f2f;
+    }
+    #manual-adjust {
+      background: #2196F3;
+    }
+    #manual-adjust:hover {
+      background: #0b7dda;
+    }
+    #go {
+      background:#4CAF50;
+    }
+    #go:hover {
+      background: #45a049;
+    }
+    #distance {
+      text-align: center;
+      font-weight: bold;
+    }
+    .compass-arrow {
+      position: absolute;
+      width: 40px;
+      height: 40px;
+      background-image: url('arr.png');
+      background-size: contain;
+      transform-origin: 50% 50%;
+      z-index: 500;
+      pointer-events: none;
+      filter: drop-shadow(0 0 2px black);
+    }
+    
+    /* Camera styles */
+    #camera-container {
+      position: absolute;
+      top: 10px;
+      right: 10px;
+      z-index: 1000;
+      border-radius: 5px;
+      overflow: hidden;
+      box-shadow: 0 0 10px rgba(0,0,0,0.5);
+      background: #000;
+    }
+    
+    #camera-stream {
+      display: block;
+      width: 480px;
+      height: 360px;
+      object-fit: cover;
+    }
+    
+    #hide-camera {
+      position: absolute;
+      top: 5px;
+      right: 5px;
+      background: rgba(0,0,0,0.7);
+      color: white;
+      border: none;
+      border-radius: 50%;
+      cursor: pointer;
+      z-index: 1001;
+      width: 24px;
+      height: 24px;
+      font-size: 16px;
+      line-height: 24px;
+      text-align: center;
+      padding: 0;
+    }
+  </style>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+</head>
+<body>
+  <div id="loading">GPS data waiting...</div>
+  <div id="error"></div>
+  <div id="map"></div>
+  <div id="compass-arrow" class="compass-arrow" style="display: none;"></div>
+
+  <!-- Camera container -->
+  <div id="camera-container">
+    <img id="camera-stream" alt="LIVE">
+    <button id="hide-camera" title="HIDE">×</button>
+  </div>
+
+  <div id="controls">
+    <div class="control-row">
+      <input id="address" type="text" placeholder="Input target address">
+      <button id="search">Search</button>
+    </div>
+    <div class="control-row">
+      <button id="manual-adjust">Correcting robot position</button>
+      <button id="clear">Clear path</button>
+      <button id="go">GO</button>
+    </div>
+    <div id="distance"></div>
+  </div>
+
+  <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/roslib/build/roslib.min.js"></script>
+  <script>
+    // Initialize map
+    var map = L.map('map').setView([0, 0], 2);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19,
+    }).addTo(map);
+
+    // Markers and variables
+    var robotIcon = L.icon({
+      iconUrl: 'robot2.png',
+      iconSize: [120, 120],
+      iconAnchor: [20, 40]
+    });
+    
+    var destinationIcon = L.icon({
+      iconUrl: 'https://cdn-icons-png.flaticon.com/512/684/684908.png',
+      iconSize: [32, 32],
+      iconAnchor: [16, 32]
+    });
+
+    var marker = L.marker([0, 0], {icon: robotIcon}).addTo(map);
+    var destinationMarker = null;
+    var routeLine = null;
+    var currentRobotPosition = null;
+    var gpsReceived = false;
+    var manualAdjustMode = false;
+    var currentHeading = 0; // Current robot rotation angle (in degrees)
+    var compassArrow = document.getElementById('compass-arrow');
+
+    // Interface elements
+    var loadingDiv = document.getElementById('loading');
+    var errorDiv = document.getElementById('error');
+    var goButton = document.getElementById('go');
+
+    // Connect to ROS
+    var ros = new ROSLIB.Ros({
+      url: 'ws://192.168.20.144:9090'
+    });
+
+    ros.on('connection', function() {
+      console.log('Connected to websocket server.');
+      errorDiv.style.display = 'none';
+    });
+
+    ros.on('error', function(error) {
+      console.log('Error connecting to websocket server:', error);
+      errorDiv.textContent = 'Error connecting to ROS: ' + error;
+      errorDiv.style.display = 'block';
+      loadingDiv.style.display = 'none';
+    });
+
+    ros.on('close', function() {
+      console.log('Connection to websocket server closed.');
+      errorDiv.textContent = 'Connection to ROS closed.';
+      errorDiv.style.display = 'block';
+      loadingDiv.style.display = 'none';
+    });
+
+    // GPS subscription
+    var gpsListener = new ROSLIB.Topic({
+      ros: ros,
+      name: '/fix',
+      messageType: 'sensor_msgs/NavSatFix'
+    });
+
+    // Magnetometer data subscription
+    var magListener = new ROSLIB.Topic({
+      ros: ros,
+      name: '/mag',
+      messageType: 'sensor_msgs/MagneticField'
+    });
+
+    gpsListener.subscribe(function(message) {
+      if (!manualAdjustMode) {
+        var lat = message.latitude;
+        var lon = message.longitude;
+        currentRobotPosition = L.latLng(lat, lon);
+        marker.setLatLng(currentRobotPosition);
+        
+        if (!gpsReceived) {
+          gpsReceived = true;
+          loadingDiv.style.display = 'none';
+          map.flyTo(currentRobotPosition, 19);
+        }
+        
+        if (destinationMarker) {
+          calculateRoute(currentRobotPosition, destinationMarker.getLatLng());
+        }
+        
+        // Update compass arrow position
+        updateCompassArrow();
+      }
+    });
+	
+	var magCalibration = {
+      x: { offset: 0, scale: 1 },
+      y: { offset: 0, scale: 1 },
+      z: { offset: 0, scale: 1 }
+    };
+
+    magListener.subscribe(function(message) {
+      // Apply calibration
+      var x = (message.magnetic_field.x - magCalibration.x.offset) * magCalibration.x.scale;
+      var y = (message.magnetic_field.y - magCalibration.y.offset) * magCalibration.y.scale;
+      var z = message.magnetic_field.z;
+      // Normalize values
+      var magnitude = Math.sqrt(x*x + y*y);
+      if (magnitude > 0) {
+        x /= magnitude;
+        y /= magnitude;
+      }
+      
+      // Calculate angle in degrees (0 = north, 90 = east)
+      currentHeading = (z-180)*-1;
+     // if (currentHeading < 0) currentHeading += 360;
+      
+      console.log('Z:', message.magnetic_field.z);
+      
+      updateCompassArrow();
+    });
+	
+    // Function to update direction arrow
+    function updateCompassArrow() {
+      if (!currentRobotPosition) return;
+      
+      var center = map.latLngToContainerPoint(currentRobotPosition);
+      var arrow = document.getElementById('compass-arrow');
+
+      arrow.style.display = 'block';
+      
+      // Position circle and arrow
+      var size = 40;
+      arrow.style.width = size + 'px';
+      arrow.style.height = size + 'px';
+      arrow.style.left = (center.x - size/2) + 'px';
+      arrow.style.top = (center.y - size/2) + 'px';
+      arrow.style.transform = 'rotate(' + currentHeading + 'deg)';
+    }
+
+    // Interface handlers
+    map.on('click', function(e) {
+      if (manualAdjustMode) {
+        currentRobotPosition = e.latlng;
+        marker.setLatLng(currentRobotPosition);
+        manualAdjustMode = false;
+        document.getElementById('manual-adjust').textContent = 'Correcting robot position';
+        document.getElementById('manual-adjust').style.background = '#2196F3';
+        
+        if (destinationMarker) {
+          calculateRoute(currentRobotPosition, destinationMarker.getLatLng());
+        }
+        
+        updateCompassArrow();
+      } else {
+        setDestination(e.latlng);
+      }
+    });
+
+    document.getElementById('search').addEventListener('click', function() {
+      var address = document.getElementById('address').value;
+      if (!address) return;
+      
+      fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(address)}`)
+        .then(response => response.json())
+        .then(data => {
+          if (data.length > 0) {
+            setDestination(L.latLng(parseFloat(data[0].lat), parseFloat(data[0].lon)));
+          } else {
+            alert('Address not found');
+          }
+        });
+    });
+
+    document.getElementById('clear').addEventListener('click', function() {
+      if (destinationMarker) map.removeLayer(destinationMarker);
+      if (routeLine) map.removeLayer(routeLine);
+      document.getElementById('distance').textContent = '';
+      document.getElementById('address').value = '';
+    });
+
+    document.getElementById('manual-adjust').addEventListener('click', function() {
+      manualAdjustMode = !manualAdjustMode;
+      if (manualAdjustMode) {
+        this.textContent = 'Check pos';
+        this.style.background = '#ff9800';
+        alert('Click to set robot position');
+      } else {
+        this.textContent = 'Correct robot pos';
+        this.style.background = '#2196F3';
+      }
+    });
+
+    // GO button handler (not functional yet)
+	//TODO move the Navigator2 method call here, sending coordinates to it
+    document.getElementById('go').addEventListener('click', function() {
+      alert('GO function will be implemented later');
+    });
+
+    // Functions
+    function setDestination(latlng) {
+      if (destinationMarker) map.removeLayer(destinationMarker);
+      if (routeLine) map.removeLayer(routeLine);
+      
+      destinationMarker = L.marker(latlng, {icon: destinationIcon}).addTo(map);
+      
+      if (currentRobotPosition) {
+        calculateRoute(currentRobotPosition, latlng);
+      }
+    }
+
+    function calculateRoute(start, end) {
+      fetch(`https://router.project-osrm.org/route/v1/driving/${start.lng},${start.lat};${end.lng},${end.lat}?overview=full&geometries=geojson`)
+        .then(response => response.json())
+        .then(data => {
+          if (data.routes && data.routes.length > 0) {
+            var route = data.routes[0];
+            document.getElementById('distance').textContent = `Distance: ${(route.distance / 1000).toFixed(2)} km`;
+            
+            routeLine = L.geoJSON(route.geometry, {
+              style: {color: 'blue', weight: 5}
+            }).addTo(map);
+            
+            map.fitBounds(routeLine.getBounds());
+          }
+        });
+    }
+
+    // Update arrow when map scale/position changes
+    map.on('move zoom', function() {
+      updateCompassArrow();
+    });
+    
+    // ======== CAMERA OPERATION CODE ========
+    const cameraImg = document.getElementById('camera-stream');
+    const hideCameraBtn = document.getElementById('hide-camera');
+    let cameraRefreshInterval = null;
+    
+    // Function to update camera image
+    function updateCameraImage() {
+      // Add timestamp to prevent caching
+      const timestamp = new Date().getTime();
+      cameraImg.src = `http://192.168.20.144:8080/stream?topic=/camera/image_raw&t=${timestamp}`;
+    }
+    
+    // Start camera update
+    function startCamera() {
+      if (!cameraRefreshInterval) {
+        updateCameraImage(); // Initial load
+        cameraRefreshInterval = setInterval(updateCameraImage, 500); // 10 FPS
+      }
+    }
+    
+    // Stop camera update
+    function stopCamera() {
+      if (cameraRefreshInterval) {
+        clearInterval(cameraRefreshInterval);
+        cameraRefreshInterval = null;
+        cameraImg.src = ''; // Clear image
+      }
+    }
+    
+    // Hide/show button handler
+    hideCameraBtn.addEventListener('click', function() {
+      if (cameraImg.style.display === 'none') {
+        // Show camera
+        cameraImg.style.display = 'block';
+        this.textContent = '×';
+        this.title = 'Hide camera';
+        startCamera();
+      } else {
+        // Hide camera
+        cameraImg.style.display = 'none';
+        this.textContent = '⊕';
+        this.title = 'Show camera';
+        stopCamera();
+      }
+    });
+    
+    // Start camera on page load
+    startCamera();
+  </script>
+</body>
+</html>
